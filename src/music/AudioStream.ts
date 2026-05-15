@@ -74,16 +74,20 @@ function getCookiesArgs(): string[] {
 
 /**
  * Get a direct audio CDN URL via yt-dlp.
- * Uses tv_embedded client — works on datacenter IPs without PO token.
- * Falls back to web client with cookies if tv_embedded fails.
+ * Uses web client with cookies — required for YouTube on datacenter IPs (2024+).
  */
 function getAudioUrl(url: string, cookiesArgs: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
+    // Log cookies status so we can verify in pm2 logs
+    if (cookiesArgs.length) {
+      console.log('[AudioStream] Using cookies:', cookiesArgs[1]);
+    } else {
+      console.warn('[AudioStream] WARNING: No cookies file found. Streaming will likely fail on datacenter IPs.');
+    }
+
     const ytdlp = spawn('yt-dlp', [
       '--no-playlist',
       '--no-warnings',
-      // tv_embedded: works on datacenter IPs, no PO token needed, has DASH audio formats
-      '--extractor-args', 'youtube:player_client=tv_embedded,web',
       '-f', 'bestaudio/best',
       '--get-url',
       ...cookiesArgs,
