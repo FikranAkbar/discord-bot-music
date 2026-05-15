@@ -8,8 +8,8 @@ const YOUTUBE_URL_RE =
   /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|shorts\/)|youtu\.be\/).+/;
 
 /**
- * Search for a track by URL or keyword via play-dl.
- * Returns a Track without requester info filled in (caller sets it).
+ * Search for a track by URL or keyword via yt-dlp.
+ * Falls back to play-dl search for keyword queries.
  */
 export async function searchTrack(
   query: string,
@@ -17,48 +17,73 @@ export async function searchTrack(
 ): Promise<Track | null> {
   try {
     if (YOUTUBE_URL_RE.test(query)) {
-      const info = await playdl.video_info(query);
-      const v = info.video_details;
-      return {
-        title: v.title ?? 'Unknown Title',
-        url: v.url,
-        duration: v.durationInSec ?? 0,
-        thumbnail: v.thumbnails[0]?.url ?? '',
-        requester: requester.user.tag,
-        requesterId: requester.user.id,
-      };
+      // Use yt-dlp to get metadata — more reliable on datacenter IPs
+      return await getTrackInfoYtDlp(query, requester);
     }
 
-    // Keyword search
-    const results = await playdl.search(query, {
-      source: { youtube: 'video' },
-      limit: 1,
-    });
-
-    if (!results.length) return null;
-    const v = results[0];
-
-    return {
-      title: v.title ?? 'Unknown Title',
-      url: v.url,
-      duration: v.durationInSec ?? 0,
-      thumbnail: v.thumbnails[0]?.url ?? '',
-      requester: requester.user.tag,
-      requesterId: requester.user.id,
-    };
+    // Keyword search: use yt-dlp with ytsearch
+    return await getTrackInfoYtDlp(`ytsearch1:${query}`, requester);
   } catch (err) {
     console.error('[AudioStream] searchTrack error:', err);
     return null;
   }
 }
 
+/** Get track metadata via yt-dlp (reliable on EC2/datacenter IPs) */
+async function getTrackInfoYtDlp(query: string, requester: GuildMember): Promise<Track | null> {
+  return new Promise((resolve, reject) => {
+    const ytdlp = spawn('yt-dlp', [
+      '--no-playlist',
+      '--dump-json',
+      '--no-warnings',
+      query,
+    ]);
+
+    let stdout = '';
+    let stderr = '';
+
+    ytdlp.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+    ytdlp.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+    ytdlp.on('close', (code) => {
+      if (code !== 0 || !stdout.trim()) {
+        reject(new Error(stderr.trim() || 'yt-dlp returned no results'));
+        return;
+      }
+      try {
+        // yt-dlp may return multiple JSON lines for playlists — take the first
+        const info = JSON.parse(stdout.trim().split('\n')[0]);
+        resolve({
+          title: info.title ?? 'Unknown Title',
+          url: info.webpage_url ?? info.url,
+          duration: info.duration ?? 0,
+          thumbnail: info.thumbnail ?? '',
+          requester: requester.user.tag,
+          requesterId: requester.user.id,
+        });
+      } catch (e) {
+        reject(new Error('Failed to parse yt-dlp output'));
+      }
+    });
+
+    ytdlp.on('error', (err) => reject(new Error(`yt-dlp not found: ${err.message}. Install with: pip3 install yt-dlp`)));
+  });
+}
+
 /**
  * Create an AudioResource for the given YouTube URL.
- * Uses play-dl to fetch the stream, then pipes through FFmpeg
- * to produce raw PCM, enabling dynamic inline volume control.
+ * Pipes yt-dlp → FFmpeg (raw PCM) for inline volume control.
+ * yt-dlp is much more reliable than play-dl on datacenter IPs.
  */
 export async function createStream(url: string, volume: number = 0.5) {
-  const source = await playdl.stream(url, { quality: 2 });
+  // yt-dlp writes audio to stdout, FFmpeg reads from stdin
+  const ytdlp = spawn('yt-dlp', [
+    '--no-playlist',
+    '--no-warnings',
+    '-f', 'bestaudio[ext=webm]/bestaudio/best',
+    '-o', '-',   // output to stdout
+    url,
+  ]);
 
   // Transcode to raw PCM so @discordjs/voice can apply inline volume
   const ffmpeg = spawn(
@@ -75,10 +100,15 @@ export async function createStream(url: string, volume: number = 0.5) {
     { stdio: ['pipe', 'pipe', 'pipe'] },
   );
 
-  source.stream.pipe(ffmpeg.stdin);
+  // Pipe yt-dlp stdout → FFmpeg stdin
+  ytdlp.stdout.pipe(ffmpeg.stdin);
 
   // Prevent unhandled errors crashing the process
-  source.stream.on('error', () => ffmpeg.stdin.destroy());
+  ytdlp.stdout.on('error', () => ffmpeg.stdin.destroy());
+  ytdlp.stderr.on('data', (d: Buffer) => {
+    const msg = d.toString().trim();
+    if (msg) console.error('[yt-dlp]', msg);
+  });
   ffmpeg.stdin.on('error', () => { /* ignore broken pipe */ });
   ffmpeg.stderr.on('data', (d: Buffer) => {
     const msg = d.toString().trim();
@@ -90,8 +120,6 @@ export async function createStream(url: string, volume: number = 0.5) {
     inlineVolume: true,
   });
 
-  // Set initial volume (play-dl + ffmpeg pipeline bypasses FFmpeg volume filter,
-  // so we rely on @discordjs/voice's inline volume transformer)
   resource.volume?.setVolume(volume);
 
   return resource;

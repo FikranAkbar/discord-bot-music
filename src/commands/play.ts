@@ -55,7 +55,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[play command] enqueue error:', err);
     await interaction.editReply({
-      embeds: [createErrorEmbed(`Failed to start playback: \`${msg}\`\n\nPastikan **FFmpeg** sudah terinstall di server.`)],
+      embeds: [createErrorEmbed(`Failed to start playback: \`${msg}\``)],
     });
     return null;
   });
