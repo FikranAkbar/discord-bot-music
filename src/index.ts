@@ -1,5 +1,6 @@
 import { Client, Collection, GatewayIntentBits } from 'discord.js';
 import * as dotenv from 'dotenv';
+import * as path from 'path';
 import { Command } from './types/index';
 
 // Commands
@@ -21,7 +22,7 @@ import * as ping from './commands/ping';
 import * as readyEvent from './events/ready';
 import * as interactionCreateEvent from './events/interactionCreate';
 
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 const TOKEN = process.env.DISCORD_TOKEN;
 if (!TOKEN) {
