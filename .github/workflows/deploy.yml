@@ -85,6 +85,17 @@ jobs:
               echo "FFmpeg already installed: $(ffmpeg -version 2>&1 | head -1)"
             fi
 
+            echo ">>> Checking yt-dlp..."
+            if ! command -v yt-dlp &> /dev/null; then
+              echo "yt-dlp not found, installing..."
+              sudo curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+              sudo chmod a+rx /usr/local/bin/yt-dlp
+            else
+              echo "Updating yt-dlp..."
+              sudo yt-dlp -U 2>/dev/null || true
+            fi
+            echo "yt-dlp version: $(yt-dlp --version)"
+
             echo ">>> Installing production dependencies..."
             npm ci --omit=dev
 
