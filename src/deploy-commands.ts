@@ -1,5 +1,6 @@
 import { REST, Routes } from 'discord.js';
 import * as dotenv from 'dotenv';
+import * as path from 'path';
 
 // Commands
 import * as play from './commands/play';
@@ -16,7 +17,7 @@ import * as remove from './commands/remove';
 import * as clear from './commands/clear';
 import * as ping from './commands/ping';
 
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
