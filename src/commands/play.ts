@@ -45,7 +45,15 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
 
   await interaction.editReply({ embeds: [createSuccessEmbed(`Searching for **${query}**...`)] });
 
-  const track = await searchTrack(query, member);
+  let track: Awaited<ReturnType<typeof searchTrack>>;
+  try {
+    track = await searchTrack(query, member);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[play command] searchTrack error:', err);
+    await interaction.editReply({ embeds: [createErrorEmbed(`Search failed: \`${msg}\``)] });
+    return;
+  }
   if (!track) {
     await interaction.editReply({ embeds: [createErrorEmbed('No results found. Try a different query or URL.')] });
     return;

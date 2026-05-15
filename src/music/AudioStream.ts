@@ -15,18 +15,8 @@ export async function searchTrack(
   query: string,
   requester: GuildMember,
 ): Promise<Track | null> {
-  try {
-    if (YOUTUBE_URL_RE.test(query)) {
-      // Use yt-dlp to get metadata — more reliable on datacenter IPs
-      return await getTrackInfoYtDlp(query, requester);
-    }
-
-    // Keyword search: use yt-dlp with ytsearch
-    return await getTrackInfoYtDlp(`ytsearch1:${query}`, requester);
-  } catch (err) {
-    console.error('[AudioStream] searchTrack error:', err);
-    return null;
-  }
+  const searchQuery = YOUTUBE_URL_RE.test(query) ? query : `ytsearch1:${query}`;
+  return await getTrackInfoYtDlp(searchQuery, requester);
 }
 
 /** Get track metadata via yt-dlp (reliable on EC2/datacenter IPs) */
