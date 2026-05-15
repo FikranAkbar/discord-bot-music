@@ -26,6 +26,21 @@ jobs:
       - name: Build TypeScript
         run: npm run build
 
+      - name: Open SSH port for this runner
+        run: |
+          RUNNER_IP=$(curl -s https://checkip.amazonaws.com)
+          echo "Runner IP: $RUNNER_IP"
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ secrets.EC2_SG_ID }} \
+            --protocol tcp \
+            --port 22 \
+            --cidr ${RUNNER_IP}/32 \
+            --region ${{ secrets.AWS_REGION }} || true
+          echo "RUNNER_IP=${RUNNER_IP}" >> $GITHUB_ENV
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
       - name: Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -51,3 +66,16 @@ jobs:
 
             echo ">>> Deploy complete ✅"
             pm2 status
+
+      - name: Close SSH port
+        if: always()
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ secrets.EC2_SG_ID }} \
+            --protocol tcp \
+            --port 22 \
+            --cidr ${RUNNER_IP}/32 \
+            --region ${{ secrets.AWS_REGION }} || true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
