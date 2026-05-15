@@ -101,12 +101,17 @@ export class GuildPlayer {
   /** Add a track to the queue and start playback if idle */
   async enqueue(track: Track): Promise<void> {
     this.queue.add(track);
+    // Only start playback if nothing is currently playing/paused.
+    // Play queue.current() directly — do NOT call advance() here,
+    // because advance() removes the current track (it is meant to be
+    // called only when a track finishes).
     if (!this.isPlaying && !this.isPaused) {
-      await this._playNext();
+      const current = this.queue.current();
+      if (current) await this._playTrack(current);
     }
   }
 
-  /** Play a specific track immediately */
+  /** Play a specific track (must already be at queue index 0) */
   private async _playTrack(track: Track): Promise<void> {
     this._clearIdleTimer();
     try {
@@ -115,23 +120,17 @@ export class GuildPlayer {
       this._player.play(resource);
     } catch (err) {
       console.error(`[GuildPlayer:${this.guildId}] Stream error:`, err);
-      // Skip broken track and try next
+      // Remove broken track and try to play the next one
       this.queue.tracks.shift();
-      await this._playNext();
+      const next = this.queue.current();
+      if (next) await this._playTrack(next);
+      else this._startIdleTimer();
     }
   }
 
-  /** Advance the queue and play the next track (or start idle timer) */
-  private async _playNext(): Promise<void> {
-    const next = this.queue.advance();
-    if (next) {
-      await this._playTrack(next);
-    } else {
-      this._startIdleTimer();
-    }
-  }
-
+  /** Called when the AudioPlayer goes Idle (track finished or skipped) */
   private async _onIdle(): Promise<void> {
+    // advance() removes the finished track and returns the next one
     const next = this.queue.advance();
     if (next) {
       await this._playTrack(next);
