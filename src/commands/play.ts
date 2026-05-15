@@ -51,7 +51,17 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     return;
   }
 
-  await player.enqueue(track);
+  await player.enqueue(track).catch(async (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[play command] enqueue error:', err);
+    await interaction.editReply({
+      embeds: [createErrorEmbed(`Failed to start playback: \`${msg}\`\n\nPastikan **FFmpeg** sudah terinstall di server.`)],
+    });
+    return null;
+  });
+
+  // If enqueue threw, the track was removed from queue — stop here
+  if (player.queue.size === 0) return;
 
   if (player.queue.size === 1) {
     // Playing immediately

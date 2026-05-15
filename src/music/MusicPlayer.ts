@@ -98,44 +98,52 @@ export class GuildPlayer {
     });
   }
 
-  /** Add a track to the queue and start playback if idle */
+  /**
+   * Add a track to the queue and start playback if idle.
+   * Throws if the stream fails — so the play command can show the error.
+   */
   async enqueue(track: Track): Promise<void> {
     this.queue.add(track);
-    // Only start playback if nothing is currently playing/paused.
-    // Play queue.current() directly — do NOT call advance() here,
-    // because advance() removes the current track (it is meant to be
-    // called only when a track finishes).
     if (!this.isPlaying && !this.isPaused) {
       const current = this.queue.current();
-      if (current) await this._playTrack(current);
+      if (current) {
+        try {
+          await this._playTrack(current);
+        } catch (err) {
+          // Remove the failed track and surface the error to the caller
+          this.queue.tracks.shift();
+          throw err;
+        }
+      }
     }
   }
 
-  /** Play a specific track (must already be at queue index 0) */
+  /**
+   * Create a stream for the given track and start the AudioPlayer.
+   * Does NOT catch errors — callers decide how to handle them.
+   */
   private async _playTrack(track: Track): Promise<void> {
     this._clearIdleTimer();
-    try {
-      const resource = await createStream(track.url, this.queue.volume);
-      this._currentResource = resource;
-      this._player.play(resource);
-    } catch (err) {
-      console.error(`[GuildPlayer:${this.guildId}] Stream error:`, err);
-      // Remove broken track and try to play the next one
-      this.queue.tracks.shift();
-      const next = this.queue.current();
-      if (next) await this._playTrack(next);
-      else this._startIdleTimer();
-    }
+    const resource = await createStream(track.url, this.queue.volume);
+    this._currentResource = resource;
+    this._player.play(resource);
   }
 
-  /** Called when the AudioPlayer goes Idle (track finished or skipped) */
+  /** Called when the AudioPlayer goes Idle (track finished or error). */
   private async _onIdle(): Promise<void> {
-    // advance() removes the finished track and returns the next one
     const next = this.queue.advance();
-    if (next) {
-      await this._playTrack(next);
-    } else {
+    if (!next) {
       this._startIdleTimer();
+      return;
+    }
+    try {
+      await this._playTrack(next);
+    } catch (err) {
+      console.error(`[GuildPlayer:${this.guildId}] Stream error for "${next.title}":`, err);
+      // Skip this broken track and try the next one
+      const following = this.queue.current();
+      if (following) void this._onIdle();
+      else this._startIdleTimer();
     }
   }
 
