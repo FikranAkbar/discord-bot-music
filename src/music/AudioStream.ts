@@ -73,77 +73,85 @@ function getCookiesArgs(): string[] {
 }
 
 /**
+ * Get a direct audio CDN URL via yt-dlp.
+ * Uses tv_embedded client — works on datacenter IPs without PO token.
+ * Falls back to web client with cookies if tv_embedded fails.
+ */
+function getAudioUrl(url: string, cookiesArgs: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const ytdlp = spawn('yt-dlp', [
+      '--no-playlist',
+      '--no-warnings',
+      // tv_embedded: works on datacenter IPs, no PO token needed, has DASH audio formats
+      '--extractor-args', 'youtube:player_client=tv_embedded,web',
+      '-f', 'bestaudio/best',
+      '--get-url',
+      ...cookiesArgs,
+      url,
+    ]);
+
+    let stdout = '';
+    let stderr = '';
+
+    ytdlp.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+    ytdlp.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+    ytdlp.on('close', (code) => {
+      const streamUrl = stdout.trim().split('\n')[0].trim();
+      if (code !== 0 || !streamUrl) {
+        reject(new Error(stderr.replace(/\s+/g, ' ').trim() || `yt-dlp exited with code ${code}`));
+      } else {
+        resolve(streamUrl);
+      }
+    });
+
+    ytdlp.on('error', (err) =>
+      reject(new Error(`yt-dlp not found: ${err.message}`)),
+    );
+  });
+}
+
+/**
  * Create an AudioResource for the given YouTube URL.
- * Uses yt-dlp (with cookies for datacenter IPs) → FFmpeg (raw PCM) → inline volume.
- * Rejects early if yt-dlp fails before producing any audio data.
+ * 1. yt-dlp resolves the direct CDN audio URL (tv_embedded client, no PO token needed)
+ * 2. FFmpeg fetches and transcodes to raw PCM for inline volume control
  */
 export function createStream(url: string, volume: number = 0.5): Promise<AudioResource> {
   return new Promise((resolve, reject) => {
     const cookiesArgs = getCookiesArgs();
 
-    const ytdlp = spawn('yt-dlp', [
-      '--no-playlist',
-      '--no-warnings',
-      '-f', 'bestaudio/best',
-      '-o', '-',
-      ...cookiesArgs,
-      url,
-    ]);
+    getAudioUrl(url, cookiesArgs).then((audioUrl) => {
+      // FFmpeg fetches the CDN URL directly — no yt-dlp stdout pipe needed
+      const ffmpeg = spawn(
+        'ffmpeg',
+        [
+          '-reconnect', '1',
+          '-reconnect_streamed', '1',
+          '-reconnect_delay_max', '5',
+          '-analyzeduration', '0',
+          '-loglevel', 'error',
+          '-i', audioUrl,
+          '-f', 's16le',
+          '-ar', '48000',
+          '-ac', '2',
+          'pipe:1',
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
 
-    const ffmpeg = spawn(
-      'ffmpeg',
-      [
-        '-analyzeduration', '0',
-        '-loglevel', 'error',
-        '-i', 'pipe:0',
-        '-f', 's16le',
-        '-ar', '48000',
-        '-ac', '2',
-        'pipe:1',
-      ],
-      { stdio: ['pipe', 'pipe', 'pipe'] },
-    );
+      ffmpeg.stderr.on('data', (d: Buffer) => {
+        const msg = d.toString().trim();
+        if (msg) console.error('[FFmpeg]', msg);
+      });
 
-    ytdlp.stdout.pipe(ffmpeg.stdin);
-    ytdlp.stdout.on('error', () => ffmpeg.stdin.destroy());
-    ffmpeg.stdin.on('error', () => { /* ignore broken pipe */ });
-    ffmpeg.stderr.on('data', (d: Buffer) => {
-      const msg = d.toString().trim();
-      if (msg) console.error('[FFmpeg]', msg);
-    });
+      ffmpeg.on('error', (err) => reject(new Error(`FFmpeg error: ${err.message}`)));
 
-    let settled = false;
-    let stderrBuf = '';
-
-    ytdlp.stderr.on('data', (d: Buffer) => { stderrBuf += d.toString(); });
-
-    // Fail fast: if yt-dlp exits before producing any stdout, surface the error
-    ytdlp.on('close', (code) => {
-      if (!settled && code !== 0) {
-        settled = true;
-        const msg = stderrBuf.replace(/\s+/g, ' ').trim() || `yt-dlp exited with code ${code}`;
-        reject(new Error(msg));
-      }
-    });
-
-    ytdlp.on('error', (err) => {
-      if (!settled) {
-        settled = true;
-        reject(new Error(`yt-dlp not found: ${err.message}. Run: sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod +rx /usr/local/bin/yt-dlp`));
-      }
-    });
-
-    // Resolve as soon as yt-dlp produces data — stream is confirmed working
-    ytdlp.stdout.once('data', () => {
-      if (!settled) {
-        settled = true;
-        const resource = createAudioResource(ffmpeg.stdout, {
-          inputType: StreamType.Raw,
-          inlineVolume: true,
-        });
-        resource.volume?.setVolume(volume);
-        resolve(resource);
-      }
-    });
+      const resource = createAudioResource(ffmpeg.stdout, {
+        inputType: StreamType.Raw,
+        inlineVolume: true,
+      });
+      resource.volume?.setVolume(volume);
+      resolve(resource);
+    }).catch(reject);
   });
 }
