@@ -1,79 +1,86 @@
 import { spawn } from 'child_process';
+import { Readable } from 'stream';
 import { createAudioResource, StreamType } from '@discordjs/voice';
-import * as playdl from 'play-dl';
+import { Innertube } from 'youtubei.js';
 import { Track } from '../types/index';
 import { GuildMember } from 'discord.js';
 
 const YOUTUBE_URL_RE =
   /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|shorts\/)|youtu\.be\/).+/;
 
+// Singleton for search — does not need player script, much faster to init
+let _searchClient: Awaited<ReturnType<typeof Innertube.create>> | null = null;
+
+async function getSearchClient() {
+  if (!_searchClient) {
+    _searchClient = await Innertube.create({ retrieve_player: false });
+  }
+  return _searchClient;
+}
+
+function extractVideoId(url: string): string {
+  const m = url.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([^&\n?#]+)/);
+  if (!m) throw new Error('Could not extract video ID from URL');
+  return m[1];
+}
+
 /**
- * Search for a track by URL or keyword via yt-dlp.
- * Falls back to play-dl search for keyword queries.
+ * Search for a track by URL or keyword using YouTube's internal Innertube API.
+ * Works reliably on datacenter IPs — no cookies or yt-dlp needed.
  */
 export async function searchTrack(
   query: string,
   requester: GuildMember,
 ): Promise<Track | null> {
-  const searchQuery = YOUTUBE_URL_RE.test(query) ? query : `ytsearch1:${query}`;
-  return await getTrackInfoYtDlp(searchQuery, requester);
-}
+  const yt = await getSearchClient();
 
-/** Get track metadata via yt-dlp (reliable on EC2/datacenter IPs) */
-async function getTrackInfoYtDlp(query: string, requester: GuildMember): Promise<Track | null> {
-  return new Promise((resolve, reject) => {
-    const ytdlp = spawn('yt-dlp', [
-      '--no-playlist',
-      '--dump-json',
-      '--no-warnings',
-      query,
-    ]);
+  if (YOUTUBE_URL_RE.test(query)) {
+    const videoId = extractVideoId(query);
+    const info = await yt.getBasicInfo(videoId);
+    const b = info.basic_info;
+    return {
+      title: b.title ?? 'Unknown Title',
+      url: `https://www.youtube.com/watch?v=${b.id}`,
+      duration: b.duration ?? 0,
+      thumbnail: b.thumbnail?.[0]?.url ?? '',
+      requester: requester.user.tag,
+      requesterId: requester.user.id,
+    };
+  }
 
-    let stdout = '';
-    let stderr = '';
+  const results = await yt.search(query, { type: 'video' });
+  const video = results.videos?.[0] as any;
+  if (!video?.id) return null;
 
-    ytdlp.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    ytdlp.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-
-    ytdlp.on('close', (code) => {
-      if (code !== 0 || !stdout.trim()) {
-        reject(new Error(stderr.trim() || 'yt-dlp returned no results'));
-        return;
-      }
-      try {
-        // yt-dlp may return multiple JSON lines for playlists — take the first
-        const info = JSON.parse(stdout.trim().split('\n')[0]);
-        resolve({
-          title: info.title ?? 'Unknown Title',
-          url: info.webpage_url ?? info.url,
-          duration: info.duration ?? 0,
-          thumbnail: info.thumbnail ?? '',
-          requester: requester.user.tag,
-          requesterId: requester.user.id,
-        });
-      } catch (e) {
-        reject(new Error('Failed to parse yt-dlp output'));
-      }
-    });
-
-    ytdlp.on('error', (err) => reject(new Error(`yt-dlp not found: ${err.message}. Install with: pip3 install yt-dlp`)));
-  });
+  return {
+    title: video.title?.text ?? video.title ?? 'Unknown Title',
+    url: `https://www.youtube.com/watch?v=${video.id}`,
+    duration: video.duration?.seconds ?? 0,
+    thumbnail: video.thumbnails?.[0]?.url ?? '',
+    requester: requester.user.tag,
+    requesterId: requester.user.id,
+  };
 }
 
 /**
  * Create an AudioResource for the given YouTube URL.
- * Pipes yt-dlp → FFmpeg (raw PCM) for inline volume control.
- * yt-dlp is much more reliable than play-dl on datacenter IPs.
+ * Uses Innertube to fetch the audio stream (bypasses bot detection),
+ * then pipes through FFmpeg for raw PCM + inline volume control.
  */
 export async function createStream(url: string, volume: number = 0.5) {
-  // yt-dlp writes audio to stdout, FFmpeg reads from stdin
-  const ytdlp = spawn('yt-dlp', [
-    '--no-playlist',
-    '--no-warnings',
-    '-f', 'bestaudio[ext=webm]/bestaudio/best',
-    '-o', '-',   // output to stdout
-    url,
-  ]);
+  // Full client with player needed to decipher stream URLs
+  const yt = await Innertube.create();
+  const videoId = extractVideoId(url);
+  const info = await yt.getInfo(videoId);
+
+  const webStream = await info.download({
+    type: 'audio',
+    quality: 'best',
+    format: 'webm',
+  });
+
+  // Convert Web ReadableStream → Node.js Readable (Node 18+ / all our targets)
+  const audioInput = Readable.fromWeb(webStream as any);
 
   // Transcode to raw PCM so @discordjs/voice can apply inline volume
   const ffmpeg = spawn(
@@ -90,15 +97,10 @@ export async function createStream(url: string, volume: number = 0.5) {
     { stdio: ['pipe', 'pipe', 'pipe'] },
   );
 
-  // Pipe yt-dlp stdout → FFmpeg stdin
-  ytdlp.stdout.pipe(ffmpeg.stdin);
+  audioInput.pipe(ffmpeg.stdin);
 
   // Prevent unhandled errors crashing the process
-  ytdlp.stdout.on('error', () => ffmpeg.stdin.destroy());
-  ytdlp.stderr.on('data', (d: Buffer) => {
-    const msg = d.toString().trim();
-    if (msg) console.error('[yt-dlp]', msg);
-  });
+  audioInput.on('error', () => ffmpeg.stdin.destroy());
   ffmpeg.stdin.on('error', () => { /* ignore broken pipe */ });
   ffmpeg.stderr.on('data', (d: Buffer) => {
     const msg = d.toString().trim();
