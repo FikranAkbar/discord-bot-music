@@ -84,9 +84,6 @@ export function createStream(url: string, volume: number = 0.5): Promise<AudioRe
     const ytdlp = spawn('yt-dlp', [
       '--no-playlist',
       '--no-warnings',
-      // Force iOS/TV-embedded clients: they provide direct (non-ciphered) URLs
-      // and are NOT blocked on datacenter IPs unlike android_vr/web clients
-      '--extractor-args', 'youtube:player_client=ios,tv_embedded',
       '-f', 'bestaudio/best',
       '-o', '-',
       ...cookiesArgs,
