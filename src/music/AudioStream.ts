@@ -1,6 +1,8 @@
 import { spawn } from 'child_process';
-import { Readable } from 'stream';
-import { createAudioResource, StreamType } from '@discordjs/voice';
+import { existsSync } from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { createAudioResource, StreamType, AudioResource } from '@discordjs/voice';
 import { Innertube } from 'youtubei.js';
 import { Track } from '../types/index';
 import { GuildMember } from 'discord.js';
@@ -62,57 +64,86 @@ export async function searchTrack(
   };
 }
 
+/** Returns --cookies flag args if a cookies file exists, otherwise empty array. */
+function getCookiesArgs(): string[] {
+  const cookiesPath =
+    process.env.YOUTUBE_COOKIES_PATH ??
+    path.join(os.homedir(), 'yt-dlp-cookies.txt');
+  return existsSync(cookiesPath) ? ['--cookies', cookiesPath] : [];
+}
+
 /**
  * Create an AudioResource for the given YouTube URL.
- * Uses Innertube to fetch the audio stream (bypasses bot detection),
- * then pipes through FFmpeg for raw PCM + inline volume control.
+ * Uses yt-dlp (with cookies for datacenter IPs) → FFmpeg (raw PCM) → inline volume.
+ * Rejects early if yt-dlp fails before producing any audio data.
  */
-export async function createStream(url: string, volume: number = 0.5) {
-  // Full client with player needed to decipher stream URLs
-  const yt = await Innertube.create();
-  const videoId = extractVideoId(url);
-  const info = await yt.getInfo(videoId);
+export function createStream(url: string, volume: number = 0.5): Promise<AudioResource> {
+  return new Promise((resolve, reject) => {
+    const cookiesArgs = getCookiesArgs();
 
-  const webStream = await info.download({
-    type: 'audio',
-    quality: 'best',
-    format: 'webm',
+    const ytdlp = spawn('yt-dlp', [
+      '--no-playlist',
+      '--no-warnings',
+      '-f', 'bestaudio[ext=webm]/bestaudio/best',
+      '-o', '-',
+      ...cookiesArgs,
+      url,
+    ]);
+
+    const ffmpeg = spawn(
+      'ffmpeg',
+      [
+        '-analyzeduration', '0',
+        '-loglevel', 'error',
+        '-i', 'pipe:0',
+        '-f', 's16le',
+        '-ar', '48000',
+        '-ac', '2',
+        'pipe:1',
+      ],
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+
+    ytdlp.stdout.pipe(ffmpeg.stdin);
+    ytdlp.stdout.on('error', () => ffmpeg.stdin.destroy());
+    ffmpeg.stdin.on('error', () => { /* ignore broken pipe */ });
+    ffmpeg.stderr.on('data', (d: Buffer) => {
+      const msg = d.toString().trim();
+      if (msg) console.error('[FFmpeg]', msg);
+    });
+
+    let settled = false;
+    let stderrBuf = '';
+
+    ytdlp.stderr.on('data', (d: Buffer) => { stderrBuf += d.toString(); });
+
+    // Fail fast: if yt-dlp exits before producing any stdout, surface the error
+    ytdlp.on('close', (code) => {
+      if (!settled && code !== 0) {
+        settled = true;
+        const msg = stderrBuf.replace(/\s+/g, ' ').trim() || `yt-dlp exited with code ${code}`;
+        reject(new Error(msg));
+      }
+    });
+
+    ytdlp.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`yt-dlp not found: ${err.message}. Run: sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod +rx /usr/local/bin/yt-dlp`));
+      }
+    });
+
+    // Resolve as soon as yt-dlp produces data — stream is confirmed working
+    ytdlp.stdout.once('data', () => {
+      if (!settled) {
+        settled = true;
+        const resource = createAudioResource(ffmpeg.stdout, {
+          inputType: StreamType.Raw,
+          inlineVolume: true,
+        });
+        resource.volume?.setVolume(volume);
+        resolve(resource);
+      }
+    });
   });
-
-  // Convert Web ReadableStream → Node.js Readable (Node 18+ / all our targets)
-  const audioInput = Readable.fromWeb(webStream as any);
-
-  // Transcode to raw PCM so @discordjs/voice can apply inline volume
-  const ffmpeg = spawn(
-    'ffmpeg',
-    [
-      '-analyzeduration', '0',
-      '-loglevel', 'error',
-      '-i', 'pipe:0',
-      '-f', 's16le',
-      '-ar', '48000',
-      '-ac', '2',
-      'pipe:1',
-    ],
-    { stdio: ['pipe', 'pipe', 'pipe'] },
-  );
-
-  audioInput.pipe(ffmpeg.stdin);
-
-  // Prevent unhandled errors crashing the process
-  audioInput.on('error', () => ffmpeg.stdin.destroy());
-  ffmpeg.stdin.on('error', () => { /* ignore broken pipe */ });
-  ffmpeg.stderr.on('data', (d: Buffer) => {
-    const msg = d.toString().trim();
-    if (msg) console.error('[FFmpeg]', msg);
-  });
-
-  const resource = createAudioResource(ffmpeg.stdout, {
-    inputType: StreamType.Raw,
-    inlineVolume: true,
-  });
-
-  resource.volume?.setVolume(volume);
-
-  return resource;
 }

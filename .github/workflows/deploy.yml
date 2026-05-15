@@ -48,6 +48,8 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Copy build artifacts to EC2
+        env:
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
         run: |
           # Write SSH key to temp file
           echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/deploy_key
@@ -63,6 +65,17 @@ jobs:
             -e "ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no" \
             package.json package-lock.json ecosystem.config.js \
             ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/discord-bot-music/
+
+          # Write YouTube cookies to EC2 if the secret is set (needed for datacenter IP streaming)
+          if [ -n "$YOUTUBE_COOKIES_B64" ]; then
+            echo "$YOUTUBE_COOKIES_B64" | base64 -d | \
+              ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no \
+              ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+              "cat > ~/yt-dlp-cookies.txt && chmod 600 ~/yt-dlp-cookies.txt"
+            echo "YouTube cookies written to EC2."
+          else
+            echo "YOUTUBE_COOKIES_B64 not set — skipping cookies. Streaming may fail on datacenter IPs."
+          fi
 
           rm -f /tmp/deploy_key
 
